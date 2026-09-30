@@ -1,0 +1,129 @@
+name: Build and cache a Roc compiler
+
+# Run by hand. Builds the compiler for one roc revision on every system the
+# flake supports and pushes it to the niclas-ahden cache, so repos pinning
+# that revision get a cache hit instead of a from-source build.
+#
+# The store path only depends on the roc revision, mkRoc's arguments and
+# mkRoc itself. A consumer gets a hit as long as its roc-nix lock has the
+# same mkRoc as the branch this runs on.
+
+on:
+  workflow_dispatch:
+    inputs:
+      rev:
+        description: roc commit (full or short sha), branch or tag
+        required: true
+        default: main
+      packages:
+        description: Which builds to cache
+        type: choice
+        default: roc
+        options:
+          - roc
+          - roc-safe
+          - both
+
+permissions:
+  contents: read
+
+jobs:
+  # Resolve the revision once, so a branch can't move between the legs.
+  resolve:
+    name: Resolve ${{ inputs.rev }}
+    runs-on: ubuntu-24.04
+    outputs:
+      sha: ${{ steps.sha.outputs.sha }}
+    steps:
+      - name: Resolve the commit
+        id: sha
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REV: ${{ inputs.rev }}
+        run: |
+          set -euo pipefail
+          sha=$(gh api "repos/roc-lang/roc/commits/$REV" --jq .sha)
+          echo "Resolved $REV to $sha"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build and push (${{ matrix.system }})
+    needs: resolve
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # A revision that fails on one system should still land on the others.
+      fail-fast: false
+      matrix:
+        # One runner per system, since Nix cannot cross-compile to Darwin.
+        include:
+          - { system: x86_64-linux, os: ubuntu-24.04 }
+          - { system: aarch64-linux, os: ubuntu-24.04-arm }
+          - { system: x86_64-darwin, os: macos-15-intel }
+          - { system: aarch64-darwin, os: macos-15 }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: cachix/install-nix-action@02a151ada4993995686f9ed4f1be7cfbb229e56f # v31
+        with:
+          nix_path: nixpkgs=channel:nixos-unstable
+          extra_nix_config: |
+            substituters = https://cache.nixos.org https://niclas-ahden.cachix.org
+            trusted-substituters = https://cache.nixos.org https://niclas-ahden.cachix.org
+            extra-trusted-public-keys = niclas-ahden.cachix.org-1:FdGli1vBk0cTuVJV27Tau/JvlbW+Ly3pRwFByyqdke0=
+
+      # Only for the credentials. Pushing everything the job adds to the store
+      # would upload the zig package set and the LLVM prebuilts too, which no
+      # consumer ever substitutes.
+      - uses: cachix/cachix-action@v15
+        with:
+          name: niclas-ahden
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          skipPush: true
+
+      - name: Build
+        id: build
+        env:
+          SHA: ${{ needs.resolve.outputs.sha }}
+          PACKAGES: ${{ inputs.packages }}
+        run: |
+          set -euo pipefail
+          case "$PACKAGES" in
+            both) attrs=(.#roc .#roc-safe) ;;
+            *) attrs=(".#$PACKAGES") ;;
+          esac
+          nix build "${attrs[@]}" \
+            --override-input roc-src "github:roc-lang/roc/$SHA?dir=src" \
+            --no-write-lock-file --no-link --print-out-paths \
+            | tee out-paths
+
+      # Catches a build that picked up the wrong revision before it is pushed.
+      - name: Check the version
+        env:
+          SHA: ${{ needs.resolve.outputs.sha }}
+        run: |
+          set -euo pipefail
+          while read -r out; do
+            version=$("$out/bin/roc" --version)
+            echo "$out: $version"
+            case "$version" in
+              *"${SHA:0:7}"*) ;;
+              *) echo "::error::$out reports '$version', expected ${SHA:0:7}"; exit 1 ;;
+            esac
+          done < out-paths
+
+      # cachix skips what cache.nixos.org already has, so this is the roc
+      # binary and little else.
+      - name: Push
+        run: cachix push niclas-ahden < out-paths
+
+      - name: Summary
+        env:
+          SHA: ${{ needs.resolve.outputs.sha }}
+        run: |
+          {
+            echo "### ${{ matrix.system }}"
+            echo
+            echo "Cached roc \`$SHA\`:"
+            echo
+            while read -r out; do echo "- \`$out\`"; done < out-paths
+          } >> "$GITHUB_STEP_SUMMARY"

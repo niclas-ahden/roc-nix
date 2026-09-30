@@ -42,6 +42,25 @@
             let m = builtins.head hits; in
             "zig_${builtins.elemAt m 0}_${builtins.elemAt m 1}";
 
+        # roc's `build.zig.zon.nix` is generated (zon2nix) and upstream has
+        # bumped the roc-bootstrap release in `build.zig.zon` without
+        # regenerating it (roc 89f0d679b2, 2026-09-06). The prebuilts are lazy
+        # dependencies, so a build only misses the one for its own host. When
+        # the lock lacks it, mkRoc fetches the tarball `build.zig.zon` names
+        # instead. Nix needs the tarball's own hash for that, keyed here by the
+        # zig package hash `build.zig.zon` gives it. To add a release:
+        #
+        #   nix hash convert --hash-algo sha256 --to sri "$(nix-prefetch-url <url>)"
+        #
+        # Entries stay harmless once upstream's lock catches up.
+        bootstrapSha256 = {
+          # llvm-21.1.8-scaling-2
+          "N-V-__8AAGRcMhjhLwO3ey8ICFyBlvCT3_7XhM1xrEzWIBRD" = "sha256-ybfR6i8Sk5dWJfOltkz1Rj2GcHoLOtVB49Td+eeZwm0="; # x86_64-linux-musl
+          "N-V-__8AAHzIKhc4RFMeZgW2iBmdo3tsRO5ZpNElA4Fm7THu" = "sha256-LCLbPdwOOMeWV9t9KERXEG6Y9AJPQ1yoEO4rxbcQGQI="; # aarch64-linux-musl
+          "N-V-__8AANLT0hHDnp788OOENaNTO0osBQU25xaf6WT4g75U" = "sha256-V1UrvlWJSAbU4ezWs9cLiWjFCLZcgeh1yZ2PXRbnrJ0="; # x86_64-macos-none
+          "N-V-__8AAI7KVRG6J1Tp9i70olobTIwsFtoF_O54b2H3PnHZ" = "sha256-MB+Zw15SuQMZHbpixXLXTw77dlXdvw6Jf2gpOOFPNuU="; # aarch64-macos-none
+        };
+
         # Repos passing the same arguments share one compiler build.
         #
         # ReleaseFast is what upstream ships as nightlies. ReleaseSafe is
@@ -69,9 +88,52 @@
             isDarwin = hostPlatform.isDarwin;
 
             # Upstream's generated lock. It pins every dependency, the
-            # roc-bootstrap prebuilts (LLVM, LLD, Binaryen, zlib) included, so
-            # nothing here needs re-pinning on a roc bump.
-            roc-deps = pkgs.callPackage "${src}/build.zig.zon.nix" { zig = zigPkg; };
+            # roc-bootstrap prebuilts (LLVM, LLD, Binaryen, zlib) included,
+            # as long as upstream regenerates it (see hostBootstrap below).
+            vendored = pkgs.callPackage "${src}/build.zig.zon.nix" { zig = zigPkg; };
+
+            # The roc-bootstrap entry for this host in `build.zig.zon`, as
+            # `{ url, hash }`, or null on revisions that have none.
+            hostBootstrap =
+              let
+                os = if isDarwin then "macos_none" else "linux_musl";
+                entry = ".roc_deps_${hostPlatform.parsed.cpu.name}_${os} = .{";
+                parts = lib.splitString entry (builtins.readFile "${src}/build.zig.zon");
+                block = builtins.head (lib.splitString "}" (lib.last parts));
+                m = builtins.match ''.*\.url = "([^"]*)".*\.hash = "([^"]*)".*'' block;
+              in
+              if builtins.length parts < 2 || m == null then null
+              else { url = builtins.elemAt m 0; hash = builtins.elemAt m 1; };
+
+            lockHasHostBootstrap =
+              hostBootstrap == null
+              || lib.hasInfix hostBootstrap.hash (builtins.readFile "${src}/build.zig.zon.nix");
+
+            # Laid out the way `zig build --system` looks packages up: one
+            # directory per package hash holding the extracted tree.
+            hostBootstrapPkg = pkgs.runCommand "roc-bootstrap-${hostBootstrap.hash}"
+              {
+                src = pkgs.fetchurl {
+                  inherit (hostBootstrap) url;
+                  hash = bootstrapSha256.${hostBootstrap.hash} or (throw ''
+                    roc-nix: build.zig.zon.nix in ${src} lacks the roc-bootstrap
+                    package ${hostBootstrap.hash} that its build.zig.zon names, and
+                    roc-nix has no hash for that tarball. Add one to bootstrapSha256:
+                      nix hash convert --hash-algo sha256 --to sri "$(nix-prefetch-url ${hostBootstrap.url})"
+                  '');
+                };
+              } ''
+              mkdir -p "$out/${hostBootstrap.hash}"
+              tar -xf "$src" -C "$out/${hostBootstrap.hash}" --strip-components=1
+            '';
+
+            roc-deps =
+              if lockHasHostBootstrap then vendored
+              else
+                pkgs.symlinkJoin {
+                  name = "zig-packages";
+                  paths = [ vendored hostBootstrapPkg ];
+                };
 
             rev = src.shortRev or "dirty";
 
