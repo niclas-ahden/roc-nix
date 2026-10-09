@@ -61,6 +61,23 @@
           "N-V-__8AAI7KVRG6J1Tp9i70olobTIwsFtoF_O54b2H3PnHZ" = "sha256-MB+Zw15SuQMZHbpixXLXTw77dlXdvw6Jf2gpOOFPNuU="; # aarch64-macos-none
         };
 
+        # Some revisions' `build.zig.zon.nix` has wrong hashes. Roc 5e44ba3
+        # gives each roc-bootstrap prebuilt its release tarball's hash, but the
+        # lock's fetcher stores the archive `zig fetch` repacks. mkRoc swaps
+        # these in, keyed by the wrong hash. Entries stay harmless once
+        # upstream fixes its lock.
+        lockHashFixes = {
+          # zig-0.17.0 roc-bootstrap
+          "sha256-8fsYBdi6UhI93qHYRsyYAD5r3+oCO0X3aH0ps4TNxhQ=" = "sha256-ofXbsRn/1I3Z5YiU3/piUS8WoYQAsElrPz5/A5lMMpc="; # aarch64-macos-none
+          "sha256-JL5OfMVLMrPiWu+8Q234SjlefeKao1Czxe+IvERQGcs=" = "sha256-HetjuaHZ0OGycif6hkg0SAJ3tbhnq+IXTkGFDoTYJn4="; # aarch64-linux-musl
+          "sha256-C+NNsepYEMQBLhFVk3mvY6F8+B6lqBc2Q8iN+hXrx4g=" = "sha256-Qf8n/KCB5yND9A2nw3tb4o/N77tLua02PHi4IWGNUMQ="; # aarch64-windows-gnu
+          "sha256-rawjQacA1uea3hENT/I0vaZ6iLu7Y5HXsISxm+frP6A=" = "sha256-0DHylCdR/cYstolRcHB0s3MPols2auAhWoJ9E7OcW9w="; # arm-linux-musleabihf
+          "sha256-cmljW3J6h0a8C5anvPFx/fAWMPRqwLOu3D22eebq7c4=" = "sha256-gpalLa824qPQZie7jVtjuGw7nkaubOrdPa9AdQyKxmk="; # x86-linux-musl
+          "sha256-mDalNVvn0h4ahUTbnpiei7Da8q7DuWXHlQuiMdrPySU=" = "sha256-QMH0EqDb9wHsbPYHoCcqGSKEH6l5pHcPj3BwJYkzFh8="; # x86_64-linux-musl
+          "sha256-A1u85DdwkyaAhGM5VF3Q/dwxsaPy7uxIhHJp4n+O1ps=" = "sha256-6YcrnS/yXyAe/u7y2pNjUt1LDMLrYI+xqyJzr8F7m+0="; # x86_64-macos-none
+          "sha256-V61M1+uaDJ91f79xh44gjdRjo/B0wZST0QsNQH25rWo=" = "sha256-TdpirB+k82LGq8VSJwuRrdc/kw2sA8hVbRUgv+gigY4="; # x86_64-windows-gnu
+        };
+
         # Repos passing the same arguments share one compiler build.
         #
         # ReleaseFast is what upstream ships as nightlies. ReleaseSafe is
@@ -81,8 +98,16 @@
             zigPkg =
               if zig != null then zig
               else
-                let attr = zigAttrFor lib src; in
-                  pkgs.${attr} or (throw "roc-nix: ${src} wants ${attr}, which this nixpkgs does not have");
+                let
+                  attr = zigAttrFor lib src;
+                  # Revisions whose nixpkgs lacks their Zig build it themselves
+                  # (roc 5e44ba3 has `src/zig-0.17.nix`).
+                  own = "${src}/src/" + lib.replaceStrings [ "zig_" "_" ] [ "zig-" "." ] attr + ".nix";
+                in
+                  pkgs.${attr} or (
+                    if builtins.pathExists own then pkgs.callPackage own { }
+                    else throw "roc-nix: ${src} wants ${attr}, which neither this nixpkgs nor ${own} has"
+                  );
 
             inherit (pkgs.stdenv) hostPlatform;
             isDarwin = hostPlatform.isDarwin;
@@ -90,7 +115,12 @@
             # Upstream's generated lock. It pins every dependency, the
             # roc-bootstrap prebuilts (LLVM, LLD, Binaryen, zlib) included,
             # as long as upstream regenerates it (see hostBootstrap below).
-            vendored = pkgs.callPackage "${src}/build.zig.zon.nix" { zig = zigPkg; };
+            lock = builtins.readFile "${src}/build.zig.zon.nix";
+            fixedLock =
+              if lib.any (wrong: lib.hasInfix wrong lock) (lib.attrNames lockHashFixes)
+              then builtins.toFile "build.zig.zon.nix" (builtins.replaceStrings (lib.attrNames lockHashFixes) (lib.attrValues lockHashFixes) lock)
+              else "${src}/build.zig.zon.nix";
+            vendored = pkgs.callPackage fixedLock { zig = zigPkg; };
 
             # The roc-bootstrap entry for this host in `build.zig.zon`, as
             # `{ url, hash }`, or null on revisions that have none.
@@ -177,8 +207,10 @@
             dontConfigure = true;
 
             # `--system` points Zig at the prevendored dependencies, so the
-            # build is offline. Keep notes out here, text inside the '' block
-            # is part of the store path.
+            # build is offline. The caches go through the environment, which
+            # Zig 0.17 still reads after dropping `zig build`'s cache flags.
+            # Keep notes out here, text inside the '' block is part of the
+            # store path.
             #
             # Zig finds macOS frameworks through xcrun, which nix builds don't
             # have, but it also reads these two nixpkgs variables. Point them
@@ -190,11 +222,11 @@
               export NIX_CFLAGS_COMPILE="''${NIX_CFLAGS_COMPILE:-} -iframework $SDKROOT/System/Library/Frameworks"
               export NIX_LDFLAGS="''${NIX_LDFLAGS:-} -L$SDKROOT/usr/lib"
             '' + ''
+              export ZIG_LOCAL_CACHE_DIR=$TMPDIR/zig-local-cache
+              export ZIG_GLOBAL_CACHE_DIR=$TMPDIR/zig-global-cache
               zig build roc -Doptimize=${optimize} ${lib.concatStringsSep " " targetFlags} \
                 -Dcompiler-version=${compilerVersion} \
-                --system ${roc-deps} \
-                --cache-dir $TMPDIR/zig-local-cache \
-                --global-cache-dir $TMPDIR/zig-global-cache
+                --system ${roc-deps}
             '';
 
             # roc looks for the libSystem.tbd stub it ships next to the binary,

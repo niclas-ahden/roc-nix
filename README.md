@@ -72,7 +72,7 @@ cached artifacts.
 | `cpu` | `"baseline"` | Instruction set floor, passed as `-Dcpu`. |
 | `patches` | `[ ]` | Patch files, as paths from the calling flake. |
 | `nixpkgs` | `rocFlake.inputs.nixpkgs` | The nixpkgs the compiler is built against. |
-| `zig` | from `build.zig.zon` | The Zig package to build with. |
+| `zig` | from `build.zig.zon` | The Zig package to build with. A revision whose nixpkgs lacks that Zig gets its own `src/zig-X.Y.nix`. |
 
 `nixpkgs`, `zig` and `cpu` are worth passing only when you want a compiler
 built against something other than what its own revision asks for.
