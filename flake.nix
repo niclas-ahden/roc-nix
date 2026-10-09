@@ -105,11 +105,24 @@
                   own = "${src}/src/" + lib.replaceStrings [ "zig_" "_" ] [ "zig-" "." ] attr + ".nix";
                 in
                   pkgs.${attr} or (
-                    if builtins.pathExists own then pkgs.callPackage own { }
+                    if builtins.pathExists own then ownZig (pkgs.callPackage own { })
                     else throw "roc-nix: ${src} wants ${attr}, which neither this nixpkgs nor ${own} has"
                   );
 
             inherit (pkgs.stdenv) hostPlatform;
+
+            # GitHub's arm64 macOS runners have 7.5 GB, under the 8 GB bound Zig
+            # 0.17 declares for compiling itself, so its build refuses to start.
+            # Its own hint is to raise --maxrss and let macOS swap.
+            ownZig = zig:
+              if isDarwin && hostPlatform.isAarch64 then
+                zig.overrideAttrs
+                  (old: {
+                    preConfigure = (old.preConfigure or "") + ''
+                      cmakeFlagsArray+=("-DZIG_EXTRA_BUILD_ARGS=-j$NIX_BUILD_CORES;--maxrss;8000000000")
+                    '';
+                  })
+              else zig;
             isDarwin = hostPlatform.isDarwin;
 
             # Upstream's generated lock. It pins every dependency, the
