@@ -13,7 +13,9 @@
   outputs = { nixpkgs, flake-utils, roc-src, ... }:
     flake-utils.lib.eachSystem [ "x86_64-linux" "aarch64-linux" "x86_64-darwin" "aarch64-darwin" ] (system:
       let
-        # Only for this flake's own tooling (not the compiler build).
+        # For this flake's own tooling, and the Zig of a revision whose own
+        # nixpkgs lacks it. The rest of the compiler build uses the nixpkgs
+        # roc locked.
         ownPkgs = import nixpkgs { inherit system; };
 
         # Fails early on `flake = false` or a missing `?dir=src`.
@@ -100,13 +102,21 @@
               else
                 let
                   attr = zigAttrFor lib src;
-                  # Revisions whose nixpkgs lacks their Zig build it themselves
-                  # (roc 5e44ba3 has `src/zig-0.17.nix`).
+                  # A revision can need a Zig newer than the nixpkgs it locked
+                  # (roc 5e44ba3 wants Zig 0.17 with a nixpkgs that stops at
+                  # 0.16). The nixpkgs this flake gets, which consumers point
+                  # at their own, then gives it prebuilt from cache.nixos.org.
+                  # Only when neither has it, the revision builds it itself
+                  # (roc 5e44ba3 has `src/zig-0.17.nix`). Newer nixpkgs throws
+                  # on x86_64-darwin, which it no longer supports, so that
+                  # counts as not having it.
                   own = "${src}/src/" + lib.replaceStrings [ "zig_" "_" ] [ "zig-" "." ] attr + ".nix";
+                  prebuilt = builtins.tryEval (ownPkgs.${attr} or null);
                 in
                   pkgs.${attr} or (
-                    if builtins.pathExists own then ownZig (pkgs.callPackage own { })
-                    else throw "roc-nix: ${src} wants ${attr}, which neither this nixpkgs nor ${own} has"
+                    if prebuilt.success && prebuilt.value != null then prebuilt.value
+                    else if builtins.pathExists own then ownZig (pkgs.callPackage own { })
+                    else throw "roc-nix: ${src} wants ${attr}, which neither this nixpkgs, nor this flake's, nor ${own} has"
                   );
 
             inherit (pkgs.stdenv) hostPlatform;
