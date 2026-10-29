@@ -218,6 +218,22 @@
             targetFlags =
               lib.optional (!isDarwin) "-Dtarget=${hostPlatform.parsed.cpu.name}-linux-musl"
               ++ [ "-Dcpu=${cpu}" ];
+
+            # On a Mac, Zig finds the SDK by asking xcode-select and xcrun,
+            # then searches its usr/lib and frameworks without adding rpaths.
+            # Nix builds have neither tool, so these answer the two questions
+            # Zig asks with the SDK the darwin stdenv provides, and refuse
+            # anything else.
+            sdkTools = [
+              (pkgs.writeShellScriptBin "xcode-select" ''
+                [ "$*" = "--print-path" ] || { echo "xcode-select shim: unsupported: $*" >&2; exit 1; }
+                echo "''${DEVELOPER_DIR:-$SDKROOT}"
+              '')
+              (pkgs.writeShellScriptBin "xcrun" ''
+                [ "$*" = "--sdk macosx --show-sdk-path" ] || { echo "xcrun shim: unsupported: $*" >&2; exit 1; }
+                echo "$SDKROOT"
+              '')
+            ];
           in
           pkgs.stdenv.mkDerivation {
             pname = "roc";
@@ -225,7 +241,8 @@
 
             inherit src patches;
 
-            nativeBuildInputs = [ zigPkg pkgs.removeReferencesTo ];
+            nativeBuildInputs = [ zigPkg pkgs.removeReferencesTo ]
+              ++ lib.optionals isDarwin sdkTools;
 
             dontConfigure = true;
 
@@ -235,20 +252,17 @@
             # Keep notes out here, text inside the '' block is part of the
             # store path.
             #
-            # Zig finds macOS frameworks through xcrun, which nix builds don't
-            # have, but it also reads NIX_CFLAGS_COMPILE. Point it at the SDK
-            # the darwin stdenv provides. `--sysroot` would turn this
-            # detection off.
-            #
-            # NIX_LDFLAGS is emptied instead: Zig makes every `-L` in it an
-            # rpath, and roc (since 0c440e5) fails its own build on any rpath
-            # in the macOS binary. The darwin stdenv puts libcxx, libiconv and
-            # others there, none of which roc links.
+            # On macOS the NIX_ variables are unset, so Zig finds the SDK
+            # through sdkTools as on any Mac. While any of them is set, Zig
+            # takes its search paths from them instead, and makes every `-L`
+            # in NIX_LDFLAGS an rpath. roc (since 0c440e5) fails its own build
+            # on any rpath in the macOS binary, and without `-L` Zig cannot
+            # resolve the SDK's /usr/lib libraries that frameworks re-export.
+            # `--sysroot` would resolve those but turn off framework search.
             buildPhase = ''
               export HOME=$TMPDIR
             '' + lib.optionalString isDarwin ''
-              export NIX_CFLAGS_COMPILE="''${NIX_CFLAGS_COMPILE:-} -iframework $SDKROOT/System/Library/Frameworks"
-              export NIX_LDFLAGS=
+              unset NIX_CFLAGS_COMPILE NIX_LDFLAGS NIX_CFLAGS_LINK
             '' + ''
               export ZIG_LOCAL_CACHE_DIR=$TMPDIR/zig-local-cache
               export ZIG_GLOBAL_CACHE_DIR=$TMPDIR/zig-global-cache
