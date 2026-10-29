@@ -236,14 +236,19 @@
             # store path.
             #
             # Zig finds macOS frameworks through xcrun, which nix builds don't
-            # have, but it also reads these two nixpkgs variables. Point them
-            # at the SDK the darwin stdenv provides. `--sysroot` would turn
-            # this detection off.
+            # have, but it also reads NIX_CFLAGS_COMPILE. Point it at the SDK
+            # the darwin stdenv provides. `--sysroot` would turn this
+            # detection off.
+            #
+            # NIX_LDFLAGS is emptied instead: Zig makes every `-L` in it an
+            # rpath, and roc (since 0c440e5) fails its own build on any rpath
+            # in the macOS binary. The darwin stdenv puts libcxx, libiconv and
+            # others there, none of which roc links.
             buildPhase = ''
               export HOME=$TMPDIR
             '' + lib.optionalString isDarwin ''
               export NIX_CFLAGS_COMPILE="''${NIX_CFLAGS_COMPILE:-} -iframework $SDKROOT/System/Library/Frameworks"
-              export NIX_LDFLAGS="''${NIX_LDFLAGS:-} -L$SDKROOT/usr/lib"
+              export NIX_LDFLAGS=
             '' + ''
               export ZIG_LOCAL_CACHE_DIR=$TMPDIR/zig-local-cache
               export ZIG_GLOBAL_CACHE_DIR=$TMPDIR/zig-global-cache
