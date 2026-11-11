@@ -30,19 +30,22 @@
         # Read the Zig version from the revision's `build.zig.zon`, so older
         # revisions keep building with the Zig they need. roc's own flake said
         # plain `pkgs.zig` for a long time, so here we'll parse it out.
-        zigAttrFor = lib: src:
+        zigMinVersionFor = lib: src:
           let
             zon = "${src}/build.zig.zon";
             hits = lib.filter (m: m != null)
               (map
-                (builtins.match ''[[:space:]]*\.minimum_zig_version = "([0-9]+)\.([0-9]+)\.[^"]*".*'')
+                (builtins.match ''[[:space:]]*\.minimum_zig_version = "([0-9]+\.[0-9]+\.[^"]*)".*'')
                 (lib.splitString "\n" (builtins.readFile zon)));
           in
           if hits == [ ] then
             throw "roc-nix: no .minimum_zig_version in ${zon}, pass `zig` to mkRoc"
           else
-            let m = builtins.head hits; in
-            "zig_${builtins.elemAt m 0}_${builtins.elemAt m 1}";
+            builtins.head (builtins.head hits);
+
+        zigAttrFor = lib: src:
+          let v = lib.splitString "." (zigMinVersionFor lib src); in
+          "zig_${builtins.elemAt v 0}_${builtins.elemAt v 1}";
 
         # roc's `build.zig.zon.nix` is generated (zon2nix) and upstream has
         # bumped the roc-bootstrap release in `build.zig.zon` without
@@ -102,6 +105,7 @@
               else
                 let
                   attr = zigAttrFor lib src;
+                  min = zigMinVersionFor lib src;
                   # A revision can need a Zig newer than the nixpkgs it locked
                   # (roc 5e44ba3 wants Zig 0.17 with a nixpkgs that stops at
                   # 0.16). The nixpkgs this flake gets, which consumers point
@@ -109,15 +113,17 @@
                   # Only when neither has it, the revision builds it itself
                   # (roc 5e44ba3 has `src/zig-0.17.nix`). Newer nixpkgs throws
                   # on x86_64-darwin, which it no longer supports, so that
-                  # counts as not having it.
+                  # counts as not having it. So does a Zig older than the
+                  # minimum (roc bf477be wants 0.17.1 where nixpkgs has 0.17.0).
                   own = "${src}/src/" + lib.replaceStrings [ "zig_" "_" ] [ "zig-" "." ] attr + ".nix";
+                  usable = z: z.success && z.value != null && lib.versionAtLeast z.value.version min;
+                  fromRoc = builtins.tryEval (pkgs.${attr} or null);
                   prebuilt = builtins.tryEval (ownPkgs.${attr} or null);
                 in
-                  pkgs.${attr} or (
-                    if prebuilt.success && prebuilt.value != null then prebuilt.value
-                    else if builtins.pathExists own then ownZig (pkgs.callPackage own { })
-                    else throw "roc-nix: ${src} wants ${attr}, which neither this nixpkgs, nor this flake's, nor ${own} has"
-                  );
+                  if usable fromRoc then fromRoc.value
+                  else if usable prebuilt then prebuilt.value
+                  else if builtins.pathExists own then ownZig (pkgs.callPackage own { })
+                  else throw "roc-nix: ${src} wants Zig ${min}, which neither this nixpkgs, nor this flake's, nor ${own} has";
 
             inherit (pkgs.stdenv) hostPlatform;
 
@@ -302,7 +308,7 @@
       {
         formatter = ownPkgs.nixpkgs-fmt;
 
-        lib = { inherit mkRoc zigAttrFor; };
+        lib = { inherit mkRoc zigAttrFor zigMinVersionFor; };
 
         packages = {
           default = mkRoc { };
