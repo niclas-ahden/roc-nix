@@ -55,15 +55,22 @@ jobs:
       fail-fast: false
       matrix:
         # One runner per system, since Nix cannot cross-compile to Darwin.
+        # aarch64-darwin runs on roc-mac, a self-hosted Mac that already has
+        # Nix (see niclas-ahden/roc-builds): a hosted macos-15 can sit queued.
+        # This workflow only starts from workflow_dispatch, so only people with
+        # write access run jobs on it.
         include:
           - { system: x86_64-linux, os: ubuntu-24.04 }
           - { system: aarch64-linux, os: ubuntu-24.04-arm }
           - { system: x86_64-darwin, os: macos-15-intel }
-          - { system: aarch64-darwin, os: macos-15 }
+          - { system: aarch64-darwin, os: roc-mac }
     steps:
       - uses: actions/checkout@v4
 
-      - uses: cachix/install-nix-action@02a151ada4993995686f9ed4f1be7cfbb229e56f # v31
+      # roc-mac has Nix already. The flags below would go into its system
+      # config, so it gets the cache from cachix-action's `cachix use` instead.
+      - if: matrix.os != 'roc-mac'
+        uses: cachix/install-nix-action@02a151ada4993995686f9ed4f1be7cfbb229e56f # v31
         with:
           nix_path: nixpkgs=channel:nixos-unstable
           extra_nix_config: |
