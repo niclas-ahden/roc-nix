@@ -59,10 +59,13 @@ jobs:
         # Nix (see niclas-ahden/roc-builds): a hosted macos-15 can sit queued.
         # This workflow only starts from workflow_dispatch, so only people with
         # write access run jobs on it.
+        # No x86_64-darwin: Nixpkgs 26.11 drops the platform and Cachix 1.12
+        # has no Intel macOS build, so cachix-action can't install there, and
+        # nothing that uses this cache runs on an Intel Mac. roc-builds still
+        # builds an Intel macOS compiler without Nix.
         include:
           - { system: x86_64-linux, os: ubuntu-24.04 }
           - { system: aarch64-linux, os: ubuntu-24.04-arm }
-          - { system: x86_64-darwin, os: macos-15-intel }
           - { system: aarch64-darwin, os: roc-mac }
     steps:
       - uses: actions/checkout@v4
